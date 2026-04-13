@@ -1,0 +1,56 @@
+┌─────────────────────────── ESP32-S3 ──────────────────────────────┐
+│  GPIO8/9  → I2C bus: BME280(0x76) + BH1750(0x23) + SSD1306(0x3C)  │
+│  GPIO10/11/12 → INMP441 microfono (I2S)                           │
+│  GPIO13/14/15 → MAX98357A speaker (I2S)                           │
+│  GPIO16/17    → UART ↔ ESP32-C6 (TX/RX incrociati)                │
+│  GPIO4  → Pulsante DND (toggle)                                   │
+│  GPIO5  → Pulsante Vol+                                           │
+│  GPIO6  → Pulsante Vol-                                           │
+│  GPIO7  → Pulsante Assistente (click singolo)                     │
+└───────────────────────────────────────────────────────────────────┘
+                        UART (2 fili + GND)
+┌─────────────────────────── ESP32-C6 ──────────────────────────────┐
+│  GPIO6/7  → I2C: SHT31 o BME280 locale                            │
+│  GPIO16/17 → UART ↔ ESP32-S3                                      │
+│  GPIO9    → Pulsante test locale                                  │
+│  GPIO8    → Status LED RGB interno                                │
+└───────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+| Stato                    | Colore          | Effetto                            |
+| ------------------------ | --------------- | ---------------------------------- |
+| Riposo                   | Blu tenue       | Respiro lento (lambda sinusoidale) |
+| In ascolto               | Ciano brillante | Fisso                              |
+| DND                      | Arancione       | Pulse lento                        |
+| No WiFi / HA disconnesso | Rosso           | Pulse veloce                       |
+| Attivo / TTS in uscita   | Verde           | Fisso                              |
+└─────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+| Stato      | Viso                                        |
+| ---------- | ------------------------------------------- |
+| Riposo     | Occhi a mezzaluna (assonnati), bocca neutra |
+| In ascolto | Occhi spalancati con pupille, bocca a "O"   |
+| DND        | Occhi a ✕, bocca giù                        |
+| No WiFi    | Occhi a spirale (stordito), bocca zigzag    |
+| Attivo     | Occhi a stella, sorriso curvo               |
+└──────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────┐
+| Boot         | led_stato_no_wifi (rosso pulse)            |
+| WiFi ok      | led_stato_riposo  (blu respiro)            |
+| HA connesso  | led_stato_riposo                           |
+| Wake word    | led_stato_ascolto (ciano)                  |
+| STT done     | led_stato_attivo  (verde)                  |
+| TTS start    | led_stato_attivo                           |
+| Risposta end | led_stato_riposo  (se DND off)             |
+| DND on       | led_stato_dnd     (arancione)              |
+| DND off      | led_stato_riposo                           |
+└───────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+| ESP32-S3          WS2812 LED                                    |
+|─────────         ──────────                                     |
+| GPIO21   ──[300Ω]──► DIN  (Data In)                              |   
+| 3.3V o 5V ────────► VCC  (5V preferibile per colori più vividi) |
+| GND       ────────► GND                                         |   
+└─────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,29 @@
+# [ESP32-C6]  --UART TX/RX--  [ESP32-S3 main]  --WiFi--  Home Assistant
+#  Thread radio                  BME280, display,
+#  802.15.4                       BLE, voice, MQTT
+
+# ESP32-C6 (no WiFi, no api, no ota via wifi)
+uart:
+  - id: uart_to_s3
+    tx_pin: GPIO16
+    rx_pin: GPIO17
+    baud_rate: 115200
+
+packet_transport:
+  platform: uart
+  sensors:
+    - thread_device_temp     # e.g. remote Thread sensor
+  binary_sensors:
+    - thread_button
+
+# ESP32-S3 (main, with WiFi)
+uart:
+  - id: uart_from_c6
+    tx_pin: GPIO17
+    rx_pin: GPIO18
+    baud_rate: 115200
+
+packet_transport:
+  platform: uart
+  providers:
+    - name: hub-thread-node

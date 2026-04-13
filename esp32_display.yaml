@@ -1,0 +1,53 @@
+# | State    | Condition                                    | Action                            |
+# | -------- | -------------------------------------------- | --------------------------------- |
+# | Off      | Lux < dark threshold (e.g. 5 lx)             | set_brightness(0.0) -> display off|
+# | Active   | Lux >= bright threshold, interaction < 5 min | set_brightness(1.0)               |
+# | Dimmed   | Lux >= threshold, inactivity > 5 min         | set_brightness(0.1)               |
+
+globals:
+  - id: last_interaction
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+script:
+  - id: reset_inactivity_timer
+    mode: restart          # every call restarts the timer from 0
+    then:
+      - lambda: id(last_interaction) = millis();
+      - display.set_brightness:
+          id: oled
+          brightness: 1.0
+      - delay: 5min
+      - lambda: |-
+          if (id(bh1750_sensor).state >= 5.0)
+            id(oled).set_brightness(0.1);
+
+sensor:
+  - platform: bme280_i2c
+    # ... BME280 config
+
+  - platform: bh1750
+    id: bh1750_sensor
+    name: "Hub Ambient Light"
+    address: 0x23
+    update_interval: 5s
+    on_value:
+      then:
+        - lambda: |-
+            if (x < 5.0) {
+              id(oled).set_brightness(0.0);   // dark -> display off
+              id(reset_inactivity_timer).stop();
+            } else {
+              id(reset_inactivity_timer).execute(); // bright -> restart timer
+            }
+
+display:
+  - platform: ssd1306_i2c
+    id: oled
+    model: "SSD1306 128x64"
+    address: 0x3C
+    brightness: 100%
+    lambda: |-
+      it.printf(0, 0, id(font_main), "%.1f°C", id(temp).state);
+      it.printf(0, 18, id(font_main), "%.0f%%", id(hum).state);

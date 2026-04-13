@@ -1,0 +1,54 @@
+substitutions:
+  device_name: hub-espectre
+  friendly_name: "Hub Presenza"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP_WIFI_CSI_ENABLED: "y"    # required for ESPectre
+      CONFIG_PM_ENABLE: "n"               # disable power management
+      CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE: "n"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+  level: INFO
+  baud_rate: 0
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+external_components:
+  - source: github://francescopace/espectre
+    components: [espectre]
+
+espectre:
+  # Automatic calibration at boot: keep the room still for 10 seconds.
+  # All parameters are optional — the defaults work well.
+  threshold: 15           # sensibilità (più basso = più sensibile)
+  publish_interval: 500ms # frequenza aggiornamento score
+
+binary_sensor:
+  - platform: espectre
+    name: "Presenza Rilevata"
+    device_class: motion
+
+sensor:
+  - platform: espectre
+    movement_score:
+      name: "Score Movimento"
+      unit_of_measurement: "%"

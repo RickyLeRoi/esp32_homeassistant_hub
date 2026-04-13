@@ -1,0 +1,107 @@
+# | Function       | GPIO  | Type                           |
+# | -------------- | ----- | ------------------------------ |
+# | Vol+           | GPIO4 | Momentary NO                   |
+# | Vol-           | GPIO5 | Momentary NO                   |
+# | Do Not Disturb | GPIO6 | Toggle/Latch or momentary      |
+# | Push-to-talk   | GPIO7 | Momentary NO                   |
+
+# ── Volume ──────────────────────────────────────────────
+number:
+  - platform: template
+    id: media_volume
+    name: "Hub Volume"
+    min_value: 0
+    max_value: 1.0
+    step: 0.1
+    initial_value: 0.5
+    optimistic: true
+    on_value:
+      then:
+        - media_player.volume_set:
+            id: hub_speaker
+            volume: !lambda return x;
+
+binary_sensor:
+  # Vol+
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Vol+"
+    on_press:
+      then:
+        - number.increment:
+            id: media_volume
+            cycle: false
+        - script.execute: reset_inactivity_timer  # also resets the display
+
+  # Vol-
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Vol-"
+    on_press:
+      then:
+        - number.decrement:
+            id: media_volume
+            cycle: false
+        - script.execute: reset_inactivity_timer
+
+  # ── Do Not Disturb ───────────────────────────────────
+  - platform: gpio
+    pin:
+      number: GPIO6
+      mode: INPUT_PULLUP
+      inverted: true
+    id: dnd_button
+    name: "Non Disturbare"
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: return id(va).is_running();
+            then:
+              - voice_assistant.stop:
+            else:
+              - voice_assistant.stop:         # safety stop
+        - micro_wake_word.stop:              # disable wake word
+        - homeassistant.service:
+            service: input_boolean.toggle
+            data:
+              entity_id: input_boolean.hub_dnd
+    on_release:
+      then:
+        - micro_wake_word.start:             # re-enable
+
+  # ── Push-to-Talk ─────────────────────────────────────
+  - platform: gpio
+    pin:
+      number: GPIO7
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Push to Talk"
+    on_press:
+      then:
+        - voice_assistant.start:            # start without wake word
+        - script.execute: reset_inactivity_timer
+    on_release:
+      then:
+        - voice_assistant.stop:
+
+# ── Voice Assistant ──────────────────────────────────────
+voice_assistant:
+  id: va
+  microphone: hub_mic
+  media_player: hub_speaker
+  use_wake_word: true
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+
+micro_wake_word:
+  model: hey_jarvis   # or "hey_nabu" — pick based on preference
+  on_wake_word_detected:
+    - voice_assistant.start:

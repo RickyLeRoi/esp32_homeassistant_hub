@@ -1,0 +1,32 @@
+ESP32-S3 (Hub Principale)
+| Componente    | Modello consigliato                  | ~Prezzo |
+| ------------- | ------------------------------------ | ------- |
+| MCU           | ESP32-S3-DevKitC-1 N16R8             | €8–12   |
+| Sensore T/U/P | BME280 breakout I2C                  | €3–5    |
+| Sensore luce  | BH1750 breakout I2C                  | €2–3    |
+| Display       | SSD1306 OLED 128×64 I2C              | €3–5    |
+| Microfono     | INMP441 I2S module                   | €3–4    |
+| Amplificatore | MAX98357A I2S DAC/Amp                | €2–3    |
+| Speaker       | 4Ω 3W, 40–50mm                       | €2–4    |
+| LED RGB       | WS2812B singolo o strip 1 LED        | €1–2    |
+| Pulsanti      | 6×6mm PCB momentanei ×4              | €1      |
+| Resistenza    | 300Ω 1/4W ×2 (led data + protezione) | <€1     |
+| Alimentazione | USB 5V 2A (minimo)                   | €5–8    |
+| Totale S3     |                                      | ~€30–47 |
+
+ESP32-C6 (Thread Node)
+| Componente    | Modello consigliato                  | ~Prezzo |
+| ------------- | ------------------------------------ | ------- |
+| MCU           | ESP32-C6-DevKitC-1                   | €5–8    |
+| Sensore T/U   | SHT31 breakout I2C (o BME280)        | €4–6    |
+| LED RGB       | WS2812B singolo                      | €1      |
+| Resistenza    | 300Ω ×1 (led data)                   | <€1     |
+| Cavi          | Dupont M-M 4 pin (UART + GND)        | €1      |
+| Totale C6     |                                      | ~€11–16 |
+
+| Componente    | Modello                              |  Prezzo |
+| ------------- | ------------------------------------ | ------- |
+| MCU           | ESP32-C3 SuperMini                   | €3–5    |
+| Alimentatore  | USB-A/C 5V 500mA                     | €3–5    |
+| Cavo USB      | Micro-USB o USB-C                    | <€1     |
+| Subtotale C3  |                                      | €3–6    |

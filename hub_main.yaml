@@ -1,0 +1,1039 @@
+﻿# ============================================================
+#  HUB PRINCIPALE — ESP32-S3-N16R8
+#
+#  Questo file è la configurazione ESPHome per il dispositivo
+#  principale del sistema hub. ESPHome converte questo YAML
+#  in codice C++ che viene compilato e flashato sull'ESP32.
+#
+#  Componenti fisici collegati:
+#    - INMP441  : microfono I2S digitale (GPIO10/11/12)
+#    - MAX98357A: amplificatore/speaker I2S (GPIO13/14/15)
+#    - BME280   : temp/umidità/pressione su I2C (GPIO8/9)
+#    - BH1750   : sensore luce su I2C (GPIO8/9)
+#    - SSD1306  : display OLED 128x64 su I2C (GPIO8/9)
+#    - WS2812   : LED RGB interno della board (GPIO48)
+#    - ESP32-C6 : nodo Thread collegato via UART (GPIO16/17)
+#    - 4 pulsanti: DND, Vol+, Vol-, Assistente (GPIO4–7)
+# ============================================================
+
+# ── SOSTITUZIONI ─────────────────────────────────────────────
+# Le substitutions sono variabili: ${device_name} viene
+# rimpiazzato con il valore definito qui in tutto il file.
+# Utile per non ripetere lo stesso valore in più punti.
+substitutions:
+  device_name: hub-taverna
+  friendly_name: "Hub P.Taverna"
+
+# ── CONFIGURAZIONE BASE ESPHOME ──────────────────────────────
+# "name" è il nome mDNS: il device sarà raggiungibile come
+# hub-main.local sulla rete locale.
+# on_boot viene eseguito una volta sola dopo l'avvio.
+# priority: -100 = "esegui per ultimo", dopo che tutti i
+# componenti sono stati inizializzati.
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  # includes: aggiunge header C++ alle lambda del file YAML.
+  # hub_includes.h contiene gli #include ESP-IDF per le lambda
+  # di diagnostica (chip info, flash, heap, wifi, netif).
+  includes:
+    - hub_includes.h
+  on_boot:
+    # priority: 800 → esegui abbastanza presto ma DOPO che il logger
+    # (priority 900) ha inizializzato la seriale. Con -100 i messaggi
+    # venivano emessi prima che la porta seriale fosse pronta.
+    priority: 800
+    then:
+      # Aspetta che la connessione seriale USB si stabilizzi.
+      # Senza questo delay i primi ESP_LOGI vengono persi perché
+      # il driver USB-CDC del PC non ha ancora aperto la porta.
+      - delay: 2s
+      # ── Stampa informazioni di sistema al boot ──────────────
+      # ESP_LOGI("tag", ...) scrive nel log con il tag "hub".
+      # I valori CONFIG_* sono costanti generate al momento della
+      # compilazione dall'SDK Espressif (file sdkconfig.h).
+      # heap_caps_get_*: API ESP-IDF per leggere la RAM.
+      - lambda: |-
+          esp_chip_info_t chip;
+          esp_chip_info(&chip);
+          uint32_t flash_size = 0;
+          esp_flash_get_size(NULL, &flash_size);
+          size_t ram_tot = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+          size_t ram_lib = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+          size_t psr_tot = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+          size_t psr_lib = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+          ESP_LOGI("hub", "╔══ SYSTEM INFO ══════════════════════════════════╗");
+          ESP_LOGI("hub", "║  ESPHome  : " ESPHOME_VERSION);
+          ESP_LOGI("hub", "║  IDF      : %s", esp_get_idf_version());
+          ESP_LOGI("hub", "║  Chip     : %s  rev.%d", CONFIG_IDF_TARGET, chip.revision);
+          ESP_LOGI("hub", "║  CPU      : %d core(s) @ %d MHz",
+                   chip.cores, CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ);
+          ESP_LOGI("hub", "║  Features : WiFi=%s  BT=%s  BLE=%s",
+                   (chip.features & CHIP_FEATURE_WIFI_BGN) ? "si" : "no",
+                   (chip.features & CHIP_FEATURE_BT)       ? "si" : "no",
+                   (chip.features & CHIP_FEATURE_BLE)      ? "si" : "no");
+          ESP_LOGI("hub", "║  Flash    : %lu MB",
+                   (unsigned long)(flash_size / (1024UL * 1024UL)));
+          ESP_LOGI("hub", "║  RAM int  : %u KB liberi / %u KB totali",
+                   (unsigned)(ram_lib / 1024), (unsigned)(ram_tot / 1024));
+          ESP_LOGI("hub", "║  PSRAM    : %u KB liberi / %u KB totali",
+                   (unsigned)(psr_lib / 1024), (unsigned)(psr_tot / 1024));
+          ESP_LOGI("hub", "║  Heap     : %u KB liberi (minimo boot: %u KB)",
+                   (unsigned)(esp_get_free_heap_size() / 1024),
+                   (unsigned)(esp_get_minimum_free_heap_size() / 1024));
+          ESP_LOGI("hub", "╚═════════════════════════════════════════════════╝");
+      - script.execute: led_stato_riposo    # LED blu respirante
+      - micro_wake_word.start:              # avvia ascolto wake word
+      - script.execute: valuta_display      # aggiusta luminosità OLED
+
+# ── CONFIGURAZIONE HARDWARE ESP32-S3 ─────────────────────────
+# board: modello fisico della scheda (influenza i pin disponibili).
+# variant: variante del chip (s3, c3, c6, ecc.).
+# framework esp-idf: più potente di Arduino, richiesto da audio
+#   e micro_wake_word. sdkconfig_options sono opzioni del kernel
+#   Espressif (equivalente al .config di Linux).
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"   # CPU a 240MHz (massimo)
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"        # cache dati 64KB
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"    # linee cache 64B
+      CONFIG_AUDIO_BOARD_CUSTOM: "y"             # board audio custom
+      # ── Flash 16MB (N16) ──────────────────────────────────
+      CONFIG_ESPTOOLPY_FLASHSIZE_16MB: "y"
+      CONFIG_ESPTOOLPY_FLASHSIZE: "16MB"
+      # ── PSRAM 8MB OPI (R8) ─────────────────────────────────
+      # FETCH_INSTRUCTIONS: il codice viene eseguito dalla PSRAM
+      #   → libera decine di KB di RAM interna per audio/wake_word.
+      # RODATA: costanti (font, tabelle, modelli TFLite) in PSRAM.
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      # Allocazioni >8KB vanno automaticamente in PSRAM.
+      # Soglia bassa: il tensor arena (~17KB) e i ring buffer audio
+      # vengono allocati in PSRAM, liberando RAM interna per il sistema.
+      CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL: "8192"
+      # ── BLE in PSRAM ───────────────────────────────────────
+      # NimBLE (stack BLE su ESP32-S3 / IDF 5.x) alloca i suoi buffer
+      # nella RAM interna per default. Con questa opzione li sposta
+      # interamente nella PSRAM, liberando ~50KB di RAM interna che
+      # altrimenti impediscono la coesistenza con micro_wake_word.
+      CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL: "y"
+      # Il controller BLE alloca blocchi permanenti in PSRAM anziché
+      # nella RAM interna (richiede SPIRAM abilitata, già configurata).
+      CONFIG_BT_CTRL_PERM_ALLOC_EXTERNAL: "y"
+
+# ── PSRAM ────────────────────────────────────────────────────
+# L'N16R8 ha 8MB di PSRAM OPI (interfaccia octal a 80MHz).
+# Senza questa sezione la PSRAM non viene inizializzata e
+# il wake word non può allocare il suo tensor arena.
+psram:
+  mode: octal
+  speed: 80MHz
+
+# ── WIFI ─────────────────────────────────────────────────────
+# Le credenziali vengono lette da secrets.yaml (mai nel codice!).
+# "ap" è un access point di emergenza: se il WiFi principale
+# non è raggiungibile, l'ESP crea una rete propria per permettere
+# la riconfigurazione via browser (captive_portal sotto).
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  on_connect:
+    then:
+      - logger.log: "WiFi connesso"
+      # ── Stampa informazioni WiFi alla connessione ────────────
+      # esp_wifi_sta_get_ap_info: restituisce i dati dell'AP
+      # a cui siamo connessi (SSID, RSSI, canale, BSSID).
+      # esp_netif_get_default_netif: ottiene l'interfaccia di rete
+      # attiva (WIFI_STA) per leggere IP, gateway e netmask.
+      - lambda: |-
+          ESP_LOGI("hub", "╔══ WIFI INFO ════════════════════════════════════╗");
+          wifi_ap_record_t ap;
+          if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            uint8_t mac[6];
+            esp_wifi_get_mac(WIFI_IF_STA, mac);
+            ESP_LOGI("hub", "║  SSID    : %s", (char*)ap.ssid);
+            ESP_LOGI("hub", "║  RSSI    : %d dBm", ap.rssi);
+            ESP_LOGI("hub", "║  Canale  : %d", ap.primary);
+            ESP_LOGI("hub", "║  BSSID   : %02x:%02x:%02x:%02x:%02x:%02x",
+                     ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                     ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+            ESP_LOGI("hub", "║  MAC STA : %02x:%02x:%02x:%02x:%02x:%02x",
+                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+          }
+          esp_netif_t *sta = esp_netif_get_default_netif();
+          if (sta) {
+            esp_netif_ip_info_t ip_info;
+            esp_netif_get_ip_info(sta, &ip_info);
+            char ip_s[16], gw_s[16], nm_s[16];
+            esp_ip4addr_ntoa(&ip_info.ip,      ip_s, sizeof(ip_s));
+            esp_ip4addr_ntoa(&ip_info.gw,      gw_s, sizeof(gw_s));
+            esp_ip4addr_ntoa(&ip_info.netmask, nm_s, sizeof(nm_s));
+            ESP_LOGI("hub", "║  IP      : %s", ip_s);
+            ESP_LOGI("hub", "║  Gateway : %s", gw_s);
+            ESP_LOGI("hub", "║  Netmask : %s", nm_s);
+          }
+          ESP_LOGI("hub", "╚═════════════════════════════════════════════════╝");
+      - script.execute: led_stato_riposo
+  on_disconnect:
+    then:
+      - logger.log:
+          level: WARN
+          format: "WiFi disconnesso!"
+      - script.execute: led_stato_no_wifi
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret ap_password
+
+# ── CAPTIVE PORTAL ───────────────────────────────────────────
+# Quando l'ESP è in modalità AP di emergenza, il captive portal
+# mostra una pagina web per configurare le credenziali WiFi.
+captive_portal:
+
+# ── WEB SERVER ───────────────────────────────────────────────
+# Espone una pagina HTTP su http://${device_name}.local (o per IP).
+# Mostra tutte le entità: sensori, switch, luci, pulsanti.
+# La scheda "LOGS" fa streaming in tempo reale dei messaggi.
+# La scheda "OTA" permette aggiornamenti firmware via browser.
+# version: 2 → UI classica con tab LOG inclusa.
+web_server:
+  port: 80
+  version: 2
+  log: true
+
+# ── LOGGER ───────────────────────────────────────────────────
+# Stampa messaggi sulla porta seriale e via API ESPHome.
+# level: DEBUG mostra dettagli interni di ogni componente.
+# Livelli disponibili (crescente verbosità):
+#   NONE, ERROR, WARN, INFO, CONFIG, DEBUG, VERBOSE, VERY_VERBOSE
+# baud_rate: 115200 → baud rate standard per UART0 / USB-bridge.
+# logs: permette di sovrascrivere il livello per componente,
+#   utile per silenziare parti molto verbose.
+logger:
+  level: DEBUG
+  baud_rate: 115200
+  logs:
+    # WiFi spamma molto: lo lasciamo a INFO
+    wifi: INFO
+    # I sensori si aggiornano spesso: evitiamo flood nel log
+    sensor: INFO
+
+# ── API HOME ASSISTANT ───────────────────────────────────────
+# Permette a Home Assistant di connettersi all'ESP.
+# La chiave di cifratura è in secrets.yaml.
+# on_client_connected/disconnected cambiano il colore del LED.
+api:
+  encryption:
+    key: !secret api_key
+  on_client_connected:
+    then:
+      - logger.log: "Home Assistant connesso"
+      - script.execute: led_stato_riposo
+  on_client_disconnected:
+    then:
+      - logger.log:
+          level: WARN
+          format: "Home Assistant disconnesso"
+      - script.execute: led_stato_no_wifi
+
+# ── OTA (Over The Air updates) ───────────────────────────────
+# Permette di aggiornare il firmware via WiFi senza cavo USB.
+# Dopo il primo flash via USB, tutti gli update successivi
+# vengono fatti con: esphome run hub_main.yaml
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ── BLUETOOTH PROXY ──────────────────────────────────────────
+# Con CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL lo stack NimBLE
+# usa la PSRAM invece della RAM interna: ora può coesistere con
+# micro_wake_word.
+# active: false → proxy passivo: ascolta advertisement BLE senza
+#   inviare richieste di scan. Sufficiente per BTHome, iBeacon,
+#   Xiaomi, ecc. Usa meno RAM e meno banda radio rispetto ad active.
+# Se hai sensori BLE che richiedono scan attivo (connessione),
+# cambia active: true sia qui che in esp32_ble_tracker.
+bluetooth_proxy:
+  active: false
+
+# esp32_ble_tracker esegue scan BLE continuo (radio sempre in ascolto).
+# La lista dispositivi viene azzerata ogni 60s dall'interval, dando
+# un'istantanea fresca dei device visibili in quel momento.
+# Deduplicazione via MAC: ogni device appare solo una volta per ciclo.
+# on_ble_advertise: aggiunge il device solo se il suo MAC non è già
+#   presente nella lista (evita duplicati tra i 60s di finestra).
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: false              # passive scan: meno RAM, no scan request
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            // Aggiunge il device solo se il MAC non è già in lista
+            if (id(ble_scan_results).find(x.address_str()) == std::string::npos
+                && id(ble_scan_results).length() < 900) {
+              char buf[80];
+              const char* nm = x.get_name().empty() ? "Sconosciuto" : x.get_name().c_str();
+              snprintf(buf, sizeof(buf), "%s (%s) %ddBm\n",
+                       nm, x.address_str().c_str(), x.get_rssi());
+              id(ble_scan_results) += std::string(buf);
+            }
+
+# ── BUS I2C ──────────────────────────────────────────────────
+# BME280, BH1750 e SSD1306 condividono lo stesso bus I2C.
+# scan: true → al boot stampa nel log gli indirizzi di tutti
+#   i dispositivi trovati sul bus (utile per verificare il cablaggio).
+# Indirizzi tipici:
+#   0x76 o 0x77 → BME280 (dipende dal pin SDO)
+#   0x23 o 0x5C → BH1750 (dipende dal pin ADDR)
+#   0x3C o 0x3D → SSD1306 (dipende dal pin SA0)
+i2c:
+  sda: GPIO8
+  scl: GPIO9
+  scan: true           # stampa i device trovati nel log al boot
+  frequency: 400kHz   # fast mode (400kHz vs standard 100kHz)
+
+# ── I2S AUDIO ────────────────────────────────────────────────
+# I2S (Inter-IC Sound) è un protocollo digitale per audio.
+# Serve un bus per il microfono (input) e uno per lo speaker
+# (output), ognuno con:
+#   BCLK (bit clock) — clock dei singoli bit
+#   LRCLK/WS (left-right clock) — distingue canale L e R
+#   DATA — flusso di campioni audio
+i2s_audio:
+  # Bus microfono — INMP441
+  - id: i2s_mic_bus
+    i2s_lrclk_pin: GPIO10   # WS  (Word Select / Left-Right clock)
+    i2s_bclk_pin:  GPIO11   # SCK (Serial Clock / Bit Clock)
+  # Bus speaker — MAX98357A
+  - id: i2s_spk_bus
+    i2s_lrclk_pin: GPIO13   # LRC
+    i2s_bclk_pin:  GPIO14   # BCLK
+
+# ── MICROFONO ────────────────────────────────────────────────
+# INMP441: microfono I2S digitale a 32bit, canale sinistro.
+# pdm: false → usa I2S standard (non PDM come nei microfoni
+#   economici dei cellulari). L'INMP441 è I2S nativo.
+microphone:
+  - platform: i2s_audio
+    id: hub_mic
+    i2s_audio_id: i2s_mic_bus
+    i2s_din_pin: GPIO12      # SD (Serial Data)
+    adc_type: external       # ADC integrato nel microfono
+    pdm: false               # I2S standard, non PDM
+    bits_per_sample: 32bit
+    channel: left            # INMP441 usa il canale sinistro
+
+# ── SPEAKER ──────────────────────────────────────────────────
+# MAX98357A: amplificatore I2S mono 3W con DAC integrato.
+# i2s_mode: primary → l'ESP32 genera i clock (è il master I2S).
+speaker:
+  - platform: i2s_audio
+    id: hub_speaker
+    i2s_audio_id: i2s_spk_bus
+    i2s_dout_pin: GPIO15     # DIN (Data In del MAX98357A)
+    dac_type: external       # DAC esterno (integrato nel MAX98357A)
+    i2s_mode: primary        # ESP32 è master del bus I2S
+
+# ── UART → ESP32-C6 ──────────────────────────────────────────
+# UART è una comunicazione seriale punto-punto.
+# Cablaggio INCROCIATO (TX di uno → RX dell'altro):
+#   S3 TX GPIO17 → C6 RX
+#   S3 RX GPIO16 ← C6 TX
+#   Massa (GND) comune obbligatoria!
+uart:
+  id: uart_c6
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+
+# ── PACKET TRANSPORT ─────────────────────────────────────────
+# Permette la comunicazione diretta tra ESP senza broker MQTT.
+# L'S3 è "consumer": riceve sensori dal C6 ("hub-thread-node").
+# Il C6 è "provider": invia i suoi sensori a questo device.
+# Il nome in providers deve corrispondere a esphome.name del C6.
+packet_transport:
+  - platform: uart          # trasporto fisico: UART
+    id: pt_from_c6
+    uart_id: uart_c6
+    providers:
+      - name: hub-thread-node   # = esphome.name di hub_thread_node.yaml
+
+# ── LED RGB WS2812 INTERNO (GPIO48) ─────────────────────────
+# Il devkit ESP32-S3-DevKitC-1 ha un LED WS2812 direttamente
+# sulla PCB, collegato a GPIO48. Non serve resistenza né
+# alimentazione esterna: è già tutto integrato sulla scheda.
+# rgb_order: GRB → i WS2812 usano l'ordine G-R-B (non RGB!).
+light:
+  - platform: esp32_rmt_led_strip
+    id: rgb_led
+    pin: GPIO48              # LED WS2812 INTERNO al devkit S3
+    num_leds: 1
+    rgb_order: GRB
+    chipset: WS2812
+    name: "Hub Status LED"
+    icon: "mdi:led-outline"
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 300ms
+    effects:
+      - pulse:
+          name: eff_pulse_slow
+          transition_length: 1500ms
+          update_interval: 2000ms
+      - pulse:
+          name: eff_pulse_fast
+          transition_length: 300ms
+          update_interval: 500ms
+      - pulse:
+          name: eff_breath
+          transition_length: 2000ms
+          update_interval: 2500ms
+          min_brightness: 10%
+          max_brightness: 80%
+
+# ── FONT ─────────────────────────────────────────────────────
+# ESPHome scarica i font da Google Fonts durante la compilazione.
+# "gfonts://" indica Google Fonts. "@700" = peso bold.
+# Formato alternativo: file: "/config/fonts/Roboto.ttf" (locale).
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 10
+  - file: "gfonts://Roboto@700"   # @700 = bold
+    id: font_bold
+    size: 14
+  - file: "gfonts://Roboto@700"
+    id: font_big
+    size: 18
+
+# ── VARIABILI GLOBALI ────────────────────────────────────────
+# Le globals persistono in memoria RAM durante tutta l'esecuzione.
+# restore_value: yes → il valore viene salvato in flash NVS e
+#   ripristinato dopo un riavvio dell'ESP.
+globals:
+  - id: dnd_active
+    type: bool
+    restore_value: yes        # ricordato dopo riavvio
+    initial_value: 'false'
+  - id: display_lux           # ultimo valore di luminosità letto
+    type: float
+    restore_value: no
+    initial_value: '100.0'
+  # hub_state: stato corrente del dispositivo.
+  # Usato dagli script LED e dalla lambda del display.
+  # 0=riposo, 1=ascolto, 2=DND, 3=no_wifi, 4=attivo/risposta
+  - id: hub_state
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Lista dispositivi BLE trovati durante l'ultima scansione.
+  # Popolata da esp32_ble_tracker.on_ble_advertise, azzerata
+  # ogni 60s dall'interval (o dal pulsante "BLE: Scansiona ora").
+  - id: ble_scan_results
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+
+# ============================================================
+#  SCRIPT
+#  Gli script sono sequenze di azioni riutilizzabili.
+#  Per richiamarli: script.execute: nome_script
+#  mode: single  → se già in esecuzione, ignora la nuova chiamata
+#  mode: restart → se richiamato, riparte dall'inizio (timer!)
+# ============================================================
+script:
+  # ── RIPOSO: blu tenue che respira ────────────────────────
+  - id: led_stato_riposo
+    mode: single
+    then:
+      - logger.log: "Stato: RIPOSO — LED blu respiro"
+      - lambda: id(hub_state) = 0;
+      - light.turn_on:
+          id: rgb_led
+          effect: eff_breath
+          red: 0%
+          green: 10%
+          blue: 100%
+          brightness: 35%
+
+  # ── IN ASCOLTO: viola fisso brillante ────────────────────
+  - id: led_stato_ascolto
+    mode: single
+    then:
+      - logger.log: "Stato: ASCOLTO — LED viola"
+      - lambda: id(hub_state) = 1;
+      - light.turn_on:
+          id: rgb_led
+          effect: none
+          red: 80%
+          green: 0%
+          blue: 100%
+          brightness: 80%
+
+  # ── DND: arancione pulse lento ───────────────────────────
+  - id: led_stato_dnd
+    mode: single
+    then:
+      - logger.log: "Stato: DND — LED arancione"
+      - lambda: id(hub_state) = 2;
+      - light.turn_on:
+          id: rgb_led
+          effect: eff_pulse_slow
+          red: 100%
+          green: 40%
+          blue: 0%
+          brightness: 30%
+
+  # ── NO WIFI: rosso pulse veloce ──────────────────────────
+  - id: led_stato_no_wifi
+    mode: single
+    then:
+      - logger.log:
+          level: WARN
+          format: "Stato: NO WIFI — LED rosso lampeggiante"
+      - lambda: id(hub_state) = 3;
+      - light.turn_on:
+          id: rgb_led
+          effect: eff_pulse_fast
+          red: 100%
+          green: 0%
+          blue: 0%
+          brightness: 80%
+
+  # ── RISPOSTA / TTS: verde fisso ──────────────────────────
+  - id: led_stato_attivo
+    mode: single
+    then:
+      - logger.log: "Stato: ATTIVO — LED verde risposta"
+      - lambda: id(hub_state) = 4;
+      - light.turn_on:
+          id: rgb_led
+          effect: none
+          red: 0%
+          green: 100%
+          blue: 20%
+          brightness: 60%
+
+  # ── Valuta luminosità display al boot ───────────────────
+  # Se al boot è già buio (lux<5), spegne subito il display.
+  - id: valuta_display
+    mode: single
+    then:
+      - lambda: |-
+          if (id(display_lux) < 5.0)
+            id(oled).set_brightness(0.0);
+
+  # ── Timer inattività display ─────────────────────────────
+  # mode: restart → ogni pressione di un pulsante azzera il timer.
+  # Dopo 1 minuto senza interazione abbassa la luminosità del display.
+  - id: timer_inattivita
+    mode: restart
+    then:
+      - lambda: |-
+          if (id(display_lux) >= 5.0)
+            id(oled).set_brightness(1.0);   // riaccende al 100%
+      - delay: 1min
+      - lambda: |-
+          if (id(display_lux) >= 5.0)
+            id(oled).set_brightness(0.15);   // dimmer notturno
+
+# ── SENSORI ──────────────────────────────────────────────────
+sensor:
+  # BME280: temperatura, umidità, pressione.
+  # address: 0x76 se SDO è collegato a GND, 0x77 se a VCC.
+  # Controlla il log al boot (scan: true sopra) per trovare
+  #   l'indirizzo reale se questo da errore "Wrong chip ID".
+  # filters offset: il BME280 si riscalda leggermente con l'uso
+  #   → sottraiamo 1.5°C per avvicinarci alla temperatura reale.
+  - platform: bme280_i2c
+    address: 0x76
+    update_interval: 30s
+    temperature:
+      id: bme_temp
+      name: "Temperatura Ambiente"
+      filters:
+        - offset: -1.5   # compensazione auto-riscaldamento
+    humidity:
+      id: bme_hum
+      name: "Umidità Ambiente"
+    pressure:
+      id: bme_pres
+      name: "Pressione Ambiente"
+
+  # BH1750: sensore di luminosità in lux.
+  # address: 0x23 se ADDR è a GND, 0x5C se a VCC.
+  # on_value viene eseguito ogni volta che arriva una nuova misura.
+  # Se la luce è inferiore a 5 lux (buio) spegniamo il display.
+  - platform: bh1750
+    id: bh1750_lux
+    name: "Luce Ambiente"
+    address: 0x23
+    update_interval: 5s
+    on_value:
+      then:
+        - lambda: id(display_lux) = x;   // salva in variabile globale
+        - if:
+            condition:
+              lambda: return x < 5.0;    // è buio?
+            then:
+              - lambda: id(oled).set_brightness(0.0);
+              - script.stop: timer_inattivita
+            else:
+              - script.execute: timer_inattivita
+
+  # Sensori ricevuti via UART dal nodo ESP32-C6 (Thread).
+  # remote_id: nome dell'id del sensore nel file hub_thread_node.yaml.
+  # internal: false → espone l'entità a Home Assistant.
+  - platform: packet_transport
+    provider: hub-thread-node
+    id: thread_temp_remote
+    remote_id: c6_temp_sensor     # id: in hub_thread_node.yaml
+    internal: false
+    name: "Temperatura Thread Remote"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+
+  - platform: packet_transport
+    provider: hub-thread-node
+    id: thread_hum_remote
+    remote_id: c6_hum_sensor      # id: in hub_thread_node.yaml
+    internal: false
+    name: "Umidità Thread Remote"
+    unit_of_measurement: "%"
+    device_class: humidity
+    state_class: measurement
+
+  # WiFi signal: intensità segnale in dBm (negativo: più vicino
+  # a zero = segnale migliore). Utile per diagnosi di rete.
+  - platform: wifi_signal
+    name: "Hub WiFi RSSI"
+    update_interval: 60s
+
+# ── SENSORE TESTO: risultati scan BLE ────────────────────────
+# Il text_sensor espone la lista BLE nel web server (tab Entities).
+# Viene aggiornato ogni 3s durante la scansione (10s di durata)
+# e mostrerà tutti i device trovati in formato:
+#   NomeDevice | MAC | dBm
+# Il valore viene resettato prima di ogni nuova scansione (60s).
+text_sensor:
+  - platform: template
+    id: ble_devices_sensor
+    name: "BLE: Dispositivi Scoperti"
+    icon: "mdi:bluetooth-search"
+    lambda: return id(ble_scan_results);
+    update_interval: 3s
+
+# ── SCAN BLE PERIODICO ───────────────────────────────────────
+# Ogni 60s: azzera la lista BLE (nuova finestra di osservazione).
+# La deduplicazione in on_ble_advertise ricomincia da zero.
+# Il pulsante "BLE: Scansiona ora" azzera subito senza aspettare.
+interval:
+  - interval: 60s
+    then:
+      - lambda: id(ble_scan_results) = "";
+      - logger.log: "BLE: lista azzerata, nuova finestra di scan"
+
+# ── CONTROLLO VOLUME ─────────────────────────────────────────
+# "number" crea un'entità numerica controllabile da HA e da
+# automazioni. optimistic: true → aggiorna lo stato subito
+# senza aspettare conferma dall'hardware (utile per controlli
+# software come questo). restore_value: yes ricorda il volume
+# dopo ogni riavvio grazie al flash NVS.
+number:
+  - platform: template
+    id: vol_level
+    name: "Volume Hub"
+    icon: "mdi:volume-high"
+    min_value: 0.0
+    max_value: 1.0
+    step: 0.05
+    initial_value: 0.5
+    optimistic: true
+    restore_value: yes           # ricorda il volume dopo il riavvio
+    on_value:
+      then:
+        - lambda: id(hub_speaker).set_volume(x);
+        - script.execute: timer_inattivita
+
+# ── PULSANTI LED / COMANDI ───────────────────────────────────
+# I button "template" sono azioni one-shot senza stato.
+# Appaiono come pulsanti cliccabili nel web server e in HA.
+button:
+  # Riavvia il dispositivo (utile per applicare aggiornamenti)
+  - platform: restart
+    name: "Restart Hub"
+    icon: "mdi:restart"
+
+  # Azzera subito la lista BLE per avere una lettura fresca
+  - platform: template
+    name: "BLE: Scansiona ora"
+    icon: "mdi:bluetooth-search"
+    on_press:
+      - lambda: id(ble_scan_results) = "";
+      - logger.log: "BLE: scansione manuale avviata"
+
+  # Forza il LED nello stato RIPOSO (blu respiro)
+  - platform: template
+    name: "LED: Riposo"
+    icon: "mdi:circle-outline"
+    on_press:
+      - script.execute: led_stato_riposo
+
+  # Forza il LED nello stato ASCOLTO
+  - platform: template
+    name: "LED: Ascolto"
+    icon: "mdi:ear-hearing"
+    on_press:
+      - script.execute: led_stato_ascolto
+
+  # Forza il LED nello stato DND
+  - platform: template
+    name: "LED: DND"
+    icon: "mdi:bell-off-outline"
+    on_press:
+      - script.execute: led_stato_dnd
+
+  # Forza il LED nello stato NO WIFI
+  - platform: template
+    name: "LED: No WiFi"
+    icon: "mdi:wifi-off"
+    on_press:
+      - script.execute: led_stato_no_wifi
+
+  # Forza il LED nello stato ATTIVO
+  - platform: template
+    name: "LED: Attivo"
+    icon: "mdi:led-on"
+    on_press:
+      - script.execute: led_stato_attivo
+
+  # Spegne il LED
+  - platform: template
+    name: "LED: Spento"
+    icon: "mdi:led-off"
+    on_press:
+      - light.turn_off: rgb_led
+
+# ── SWITCH DND ───────────────────────────────────────────────
+# "switch template": switch virtuale senza GPIO fisico.
+# restore_mode: RESTORE_DEFAULT_OFF → all'avvio è sempre OFF.
+# Quando DND è ON: micro_wake_word si ferma (niente risvegli),
+# voice_assistant viene interrotto se in corso.
+switch:
+  - platform: template
+    id: sw_dnd
+    name: "Non Disturbare"
+    icon: "mdi:bell-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      then:
+        - logger.log: "DND attivato — ascolto wake word sospeso"
+        - lambda: id(dnd_active) = true;
+        - micro_wake_word.stop:       # smette di ascoltare
+        - voice_assistant.stop:       # interrompe sessione in corso
+        - script.execute: led_stato_dnd
+    on_turn_off:
+      then:
+        - logger.log: "DND disattivato — riprendo ascolto"
+        - lambda: id(dnd_active) = false;
+        - micro_wake_word.start:
+        - script.execute: led_stato_riposo
+
+# ── PULSANTI FISICI ──────────────────────────────────────────
+# platform: gpio → legge da un pin digitale.
+# mode: INPUT_PULLUP → resistenza interna di pull-up abilitata
+#   (pin normalmente HIGH, va a LOW quando il pulsante è premuto).
+# inverted: true → inverte la logica (LOW=premuto → true).
+# delayed_on: 20ms → debounce: il segnale deve essere stabile
+#   per 20ms prima di essere considerato valido (evita false letture).
+binary_sensor:
+  # Pulsante DND — toggle momentaneo
+  - platform: gpio
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Pulsante DND"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      then:
+        - if:
+            condition:
+              switch.is_on: sw_dnd
+            then:
+              - switch.turn_off: sw_dnd
+            else:
+              - switch.turn_on: sw_dnd
+        - script.execute: timer_inattivita
+
+  # Vol+
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Vol+"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      then:
+        - number.set:
+            id: vol_level
+            value: !lambda |-
+              float v = id(vol_level).state + 0.1;
+              return v > 1.0 ? 1.0 : v;
+        - script.execute: timer_inattivita
+
+  # Vol-
+  - platform: gpio
+    pin:
+      number: GPIO6
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Vol-"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      then:
+        - number.set:
+            id: vol_level
+            value: !lambda |-
+              float v = id(vol_level).state - 0.1;
+              return v < 0.0 ? 0.0 : v;
+        - script.execute: timer_inattivita
+
+  # Pulsante Assistente — click singolo avvia
+  - platform: gpio
+    pin:
+      number: GPIO7
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Pulsante Assistente"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      then:
+        - if:
+            condition:
+              switch.is_on: sw_dnd
+            then:
+              - logger.log: "Bloccato: DND attivo"
+            else:
+              - voice_assistant.start:
+        - script.execute: timer_inattivita
+
+  # Pulsante remoto ricevuto via UART dal C6.
+  # Funziona come un GPIO locale ma il segnale arriva
+  # attraverso il packet_transport dalla rete UART.
+  - platform: packet_transport
+    provider: hub-thread-node
+    id: thread_button_remote
+    remote_id: c6_test_button     # id: in hub_thread_node.yaml
+    internal: false
+    name: "Pulsante Thread Remote"
+
+  # platform: status → true quando l'API HA è connessa.
+  - platform: status
+    name: "Hub Connesso"
+
+# ============================================================
+#  DISPLAY — visi disegnati con primitive grafiche
+#  Layout 128x64:
+#    Colonna sinistra  (0..54):  viso 54x54 px centrato
+#    Colonna destra (58..127):  dati sensori
+# ============================================================
+display:
+  - platform: ssd1306_i2c
+    id: oled
+    model: "SSD1306 128x64"
+    address: 0x3C
+    brightness: 100%
+    update_interval: 1s    # 1s per animare gli occhi
+    lambda: |-
+      // ── Dati a destra ──────────────────────────────────
+      it.printf(60, 0,  id(font_bold),  "%.1f C", id(bme_temp).state);
+      it.printf(60, 16, id(font_small), "%.0f%%", id(bme_hum).state);
+      it.printf(60, 28, id(font_small), "%.0fhPa", id(bme_pres).state);
+      it.printf(60, 40, id(font_small), "Lux:%.0f", id(bh1750_lux).state);
+      it.printf(60, 52, id(font_small), "Vol:%.0f%%", id(vol_level).state * 100);
+
+      // Linea divisoria verticale
+      it.vertical_line(56, 0, 64);
+
+      // ── Viso a sinistra (area 54x64, centro cx=27 cy=32) ─
+      // hub_state: 0=riposo, 1=ascolto, 2=DND, 3=no_wifi, 4=attivo
+      int cx = 27, cy = 30;
+      int state = id(hub_state);
+
+      // Testa (cerchio comune a tutti i visi)
+      it.circle(cx, cy, 22);
+
+      if (state == 0) {
+        // ── RIPOSO: occhi a mezzaluna (assonnati) ─────────
+        // Occhio sinistro: arco superiore = semicerchio riempito
+        it.filled_circle(cx - 8, cy - 3, 4);
+        it.filled_rectangle(cx - 12, cy - 3, 9, 5); // copre metà inferiore
+        it.circle(cx - 8, cy - 3, 4);               // ribordo
+        // Occhio destro
+        it.filled_circle(cx + 8, cy - 3, 4);
+        it.filled_rectangle(cx + 4, cy - 3, 9, 5);
+        it.circle(cx + 8, cy - 3, 4);
+        // Bocca: linea orizzontale neutra
+        it.line(cx - 8, cy + 11, cx + 8, cy + 11);
+
+      } else if (state == 1) {
+        // ── IN ASCOLTO: occhi spalancati, bocca "O" ───────
+        it.filled_circle(cx - 8, cy - 3, 5);
+        it.filled_circle(cx + 8, cy - 3, 5);
+        // Pupille (punti bianchi = pixel spenti = bianco su OLED nero)
+        it.filled_circle(cx - 8, cy - 3, 2);  // pupilla scura
+        it.filled_circle(cx + 8, cy - 3, 2);
+        // Bocca: cerchio aperto (stupore/ascolto)
+        it.circle(cx, cy + 11, 5);
+
+      } else if (state == 2) {
+        // ── DND: occhi a X, bocca giù ─────────────────────
+        // Occhio sinistro: X
+        it.line(cx - 11, cy - 7, cx - 5, cy - 1);
+        it.line(cx - 5,  cy - 7, cx - 11, cy - 1);
+        // Occhio destro: X
+        it.line(cx + 5,  cy - 7, cx + 11, cy - 1);
+        it.line(cx + 11, cy - 7, cx + 5,  cy - 1);
+        // Bocca: curva verso il basso (triste)
+        it.line(cx - 8, cy + 12, cx - 4, cy + 15);
+        it.line(cx - 4, cy + 15, cx + 4, cy + 15);
+        it.line(cx + 4, cy + 15, cx + 8, cy + 12);
+
+      } else if (state == 3) {
+        // ── NO WIFI: occhi a spirale (stordito), bocca aperta ─
+        // Occhio sinistro: cerchi concentrici
+        it.circle(cx - 8, cy - 3, 5);
+        it.circle(cx - 8, cy - 3, 2);
+        it.filled_circle(cx - 8, cy - 3, 1);
+        // Occhio destro
+        it.circle(cx + 8, cy - 3, 5);
+        it.circle(cx + 8, cy - 3, 2);
+        it.filled_circle(cx + 8, cy - 3, 1);
+        // Bocca: zigzag (confuso)
+        it.line(cx - 8, cy + 10, cx - 4, cy + 14);
+        it.line(cx - 4, cy + 14, cx,     cy + 10);
+        it.line(cx,     cy + 10, cx + 4, cy + 14);
+        it.line(cx + 4, cy + 14, cx + 8, cy + 10);
+
+      } else if (state == 4) {
+        // ── ATTIVO / RISPOSTA: occhi a stella, bocca sorridente ─
+        // Occhio sinistro: stella (raggi dal centro)
+        it.filled_circle(cx - 8, cy - 3, 4);
+        it.line(cx - 8, cy - 8,  cx - 8, cy + 2);  // verticale
+        it.line(cx - 13, cy - 3, cx - 3, cy - 3);  // orizzontale
+        it.line(cx - 11, cy - 6, cx - 5, cy);      // diagonale /
+        it.line(cx - 5,  cy - 6, cx - 11, cy);     // diagonale \
+        // Occhio destro
+        it.filled_circle(cx + 8, cy - 3, 4);
+        it.line(cx + 8,  cy - 8,  cx + 8, cy + 2);
+        it.line(cx + 3,  cy - 3,  cx + 13, cy - 3);
+        it.line(cx + 5,  cy - 6,  cx + 11, cy);
+        it.line(cx + 11, cy - 6,  cx + 5,  cy);
+        // Bocca: sorriso curvo
+        it.line(cx - 8, cy + 10, cx - 5, cy + 14);
+        it.line(cx - 5, cy + 14, cx,     cy + 15);
+        it.line(cx,     cy + 15, cx + 5, cy + 14);
+        it.line(cx + 5, cy + 14, cx + 8, cy + 10);
+      }
+
+      // Etichetta stato sotto il viso
+      if (state == 0) it.printf(1, 56, id(font_small), "RIPOSO");
+      if (state == 1) it.printf(1, 56, id(font_small), "ASCOLTO");
+      if (state == 2) it.printf(1, 56, id(font_small), "DND");
+      if (state == 3) it.printf(1, 56, id(font_small), "NO WIFI");
+      if (state == 4) it.printf(1, 56, id(font_small), "ATTIVO");
+
+# ── MICRO WAKE WORD ──────────────────────────────────────────
+# Rileva la parola chiave direttamente sul dispositivo (on-device),
+# senza inviare audio al cloud.
+# Il modello TFLite viene scaricato dal repository ESPHome
+# durante la compilazione.
+# I nomi semplici ("hey_jarvis") non sono più accettati nelle versioni
+# recenti di ESPHome: occorre usare il percorso GitHub completo.
+# Formato: github://<org>/<repo>/path/al/file.json@<branch>
+# Il modello v2 è più accurato del v1 (meno falsi positivi).
+# Il tensor arena del modello viene allocato in PSRAM grazie
+# a CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL impostato sopra.
+micro_wake_word:
+  microphone:
+    microphone: hub_mic    # usa il microfono definito sopra
+    channels: 0            # canale 0 = sinistro (INMP441)
+  models:
+    - model: github://esphome/micro-wake-word-models/models/v2/hey_jarvis.json@main
+  on_wake_word_detected:
+    then:
+      - logger.log: "Wake word rilevata: avvio voice assistant"
+      - voice_assistant.start:
+      - script.execute: timer_inattivita
+
+# ── VOICE ASSISTANT ──────────────────────────────────────────
+# Invia l'audio a Home Assistant che lo elabora con Assist.
+# Richiede HA 2023.5+ con un pipeline Assist configurato.
+# noise_suppression_level: 0-4, riduce il rumore di fondo.
+# auto_gain: 0-31dBFS, amplificazione automatica del microfono.
+# volume_multiplier: moltiplica il volume dell'audio in ingresso.
+voice_assistant:
+  id: va
+  microphone:
+    microphone: hub_mic
+    channels: 0
+  speaker: hub_speaker
+  noise_suppression_level: 2    # livello medio soppressione rumore
+  auto_gain: 31dBFS             # guadagno automatico massimo
+  volume_multiplier: 4.0        # amplifica input microfono
+  on_listening:
+    then:
+      - logger.log: "Voice assistant: in ascolto"
+      - script.execute: led_stato_ascolto
+  on_stt_end:
+    then:
+      - logger.log:              # mostra la frase riconosciuta nel log
+          format: "STT: %s"
+          args: [x]
+      - script.execute: led_stato_attivo
+  on_tts_start:
+    then:
+      - logger.log:              # mostra il testo della risposta nel log
+          format: "TTS: %s"
+          args: [x]
+      - script.execute: led_stato_attivo
+  on_end:
+    then:
+      # Aspetta che l'audio TTS finisca prima di riavviare il wake word
+      - wait_until:
+          not:
+            voice_assistant.is_running:
+      - if:
+          condition:
+            switch.is_off: sw_dnd
+          then:
+            - micro_wake_word.start:
+            - script.execute: led_stato_riposo
+          else:
+            - script.execute: led_stato_dnd
+  on_error:
+    then:
+      - logger.log:
+          level: WARN
+          format: "Voice assistant errore: %s — %s"
+          args: [code, message]
+      - if:
+          condition:
+            switch.is_off: sw_dnd
+          then:
+            - micro_wake_word.start:
+            - script.execute: led_stato_riposo
+          else:
+            - script.execute: led_stato_dnd
