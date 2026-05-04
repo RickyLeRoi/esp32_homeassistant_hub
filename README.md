@@ -343,6 +343,160 @@ Removes **everything** under `.esphome/build/` for that device, including all ge
 
 ---
 
+## Troubleshooting: ESP32-C3 / ESPectre build failures
+
+This section documents real issues encountered when building `hub-espectre-c3.yaml` with ESPHome 2026.x + PlatformIO + ESP-IDF 5.5 on Windows.
+
+### 1. `Failed to install Python dependencies (exit code: 2)`
+
+**Symptom:** PlatformIO fails immediately after printing the board/framework list, before any compilation starts.
+
+**Root cause:** PlatformIO calls `tool-esp_install/tools/idf_tools.py check-python-dependencies`, which expects the IDF Python virtual environment at:
+
+```
+C:\Users\<user>\.platformio\python_env\idf5.5_py3.13_env\Scripts\python.exe
+```
+
+This directory is not created automatically on a fresh PlatformIO install.
+
+**Fix:**
+
+```powershell
+# 1. Create the missing venv with the system Python
+$v = "$env:USERPROFILE\.platformio\python_env\idf5.5_py3.13_env"
+& "C:\Users\<user>\AppData\Local\Programs\Python\Python313\python.exe" -m venv $v
+
+# 2. Install ESP-IDF Python requirements into it
+$req = "$env:USERPROFILE\.platformio\packages\framework-espidf\tools\requirements\requirements.core.txt"
+& "$v\Scripts\python.exe" -m pip install -r $req
+```
+
+> Adjust the Python path to match your installed version (`Python313`, `Python311`, etc.).
+
+---
+
+### 2. `No such file or directory: tools/requirements/requirements.core.txt` inside `tool-esp_install`
+
+**Symptom:** Same exit-code-2 error, but after the fix above the check still fails because `tool-esp_install` itself is missing its `tools/requirements/` directory.
+
+**Root cause:** The `tool-esp_install` package ships a `requirements.json` that references `tools/requirements/requirements.core.txt` relative to its own directory, but the directory is absent from the downloaded package.
+
+**Fix:**
+
+```powershell
+$src = "$env:USERPROFILE\.platformio\packages\framework-espidf\tools\requirements"
+$dst = "$env:USERPROFILE\.platformio\packages\tool-esp_install\tools\requirements"
+New-Item -ItemType Directory $dst -Force
+Copy-Item "$src\*" $dst
+```
+
+---
+
+### 3. CMake error on first run after a clean: `CMakeDetermineASMCompiler.cmake: No such file or directory`
+
+**Symptom:** The first build after `esphome clean` fails with:
+
+```
+CMake Error at .../CMakeDetermineASMCompiler.cmake:272 (configure_file):
+  No such file or directory
+```
+
+followed by `component_requires.temp.cmake not found`.
+
+**Root cause:** CMake 4.0 (shipped by PlatformIO as `tool-cmake @ 4.0.3`) has a regression with the ESP-IDF 5.5 CMake configuration sequence. On the **first** run of a clean build directory the ASM compiler detection step fails before writing the `component_requires.temp.cmake` file needed by the IDF component manager.
+
+**Fix:** Run the build **twice**. The first run populates `CMakeFiles/4.0.3/` with the compiler detection results; the second run finds those cached files and proceeds normally:
+
+```powershell
+# First run will fail at CMake configure
+.venv\Scripts\python -m esphome compile hub-espectre-c3.yaml
+
+# Second run succeeds, using the cached compiler info
+.venv\Scripts\python -m esphome compile hub-espectre-c3.yaml
+```
+
+> Do **not** run `esphome clean` between the two attempts — it would wipe the CMake cache files that make the second run work.
+
+---
+
+### 4. ESP32-C3 not detected on Windows / USB driver issue
+
+**Symptom:** The ESP32-C3 SuperMini (or similar C3 board with native USB) does not appear as a COM port in Device Manager, or appears as an "Unknown device".
+
+**Root cause:** The ESP32-C3 uses its built-in USB-Serial/JTAG peripheral (VID `303A`, PID `4001`). Windows does not include a driver for this by default.
+
+**Fix options:**
+
+- **Option A — Zadig (recommended for serial flashing):**
+  1. Download [Zadig](https://zadig.akeo.ie/).
+  2. In Zadig: `Options → List All Devices`, select `USB JTAG/serial debug unit (Interface 0)`.
+  3. Install the **USB Serial (CDC)** driver (not WinUSB).
+  4. The device will now appear as `COMx` and can be flashed normally.
+
+- **Option B — Web flasher (no driver needed, first flash only):**
+  Navigate to [web.esphome.io](https://web.esphome.io/) in Chrome/Edge, connect the device, and use the pre-built `firmware.factory.bin` from `.esphome/build/<device>/.pioenvs/<device>/firmware.factory.bin`.
+
+---
+
+### 5. ESPectre API — configuration format for v2.7.0+
+
+The ESPectre component changed its YAML API. The legacy format (separate `binary_sensor`/`sensor` platform entries) no longer works. Use the inline format:
+
+```yaml
+espectre:
+  segmentation_threshold: 1.5    # float 0.0–10.0, replaces "threshold"
+  publish_interval: 50           # integer (packet count), not a duration
+  motion_sensor:
+    name: "Presenza Terra"
+    device_class: motion
+  movement_sensor:
+    name: "Movimento Terra (score)"
+    filters:
+      - multiply: 100
+      - clamp:
+          min_value: 0
+          max_value: 100
+  calibrate_switch:
+    name: "Ricalibra Terra"
+```
+
+Lock the component version to avoid future breaking changes:
+
+```yaml
+external_components:
+  - source:
+      type: git
+      url: https://github.com/francescopace/espectre
+      ref: "2.7.0"
+    components: [espectre]
+    refresh: never
+```
+
+---
+
+### 6. WiFi `Auth Expired` reconnection loop
+
+**Symptom:** The device connects to WiFi, gets `Auth Expired`, disconnects, and loops indefinitely, never reaching a stable connected state.
+
+**Fix:** Add these two options to the `wifi:` block:
+
+```yaml
+wifi:
+  fast_connect: true
+  power_save_mode: none
+```
+
+Also add to `esp32.framework.sdkconfig_options`:
+
+```yaml
+CONFIG_PM_ENABLE: "n"
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE: "n"
+```
+
+These disable the power management features that cause the C3 to drop the association when the access point's power-save negotiation times out.
+
+---
+
 ## Project structure
 
 ```

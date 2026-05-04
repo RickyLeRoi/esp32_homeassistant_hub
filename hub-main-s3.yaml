@@ -23,7 +23,7 @@
 # I used hub-terra and hub-taverna because I have two of these hubs in different rooms, but you can choose any name you like.
 substitutions:
   device_name: hub-main
-  friendly_name: "Hub Main"
+  friendly_name: "Hub - Main"
 
 # ── ESPHOME BASE CONFIG ──────────────────────────────────────
 # "name" is the mDNS name: the device will be reachable as
