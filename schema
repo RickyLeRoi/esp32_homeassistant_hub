@@ -7,6 +7,7 @@
 │  GPIO5  → Pulsante Vol+                                           │
 │  GPIO6  → Pulsante Vol-                                           │
 │  GPIO7  → Pulsante Assistente (click singolo)                     │
+│  GPIO48  → LED che si accende con quello onboard                  │
 └───────────────────────────────────────────────────────────────────┘
                         UART (2 fili + GND)
 ┌─────────────────────────── ESP32-C6 ──────────────────────────────┐

@@ -1,0 +1,133 @@
+# ============================================================
+#  THREAD NODE — ESP32-C6
+#
+#  This device does NOT connect to WiFi and is NOT visible to
+#  Home Assistant directly. Its sole job is to read the I2C
+#  sensors and forward the values to the ESP32-S3 main hub
+#  via a hardware UART link using ESPHome's packet_transport.
+#
+#  Data flow:
+#    SHT31 (I2C) → sensor readings
+#    GPIO9 button → binary_sensor state
+#         ↓
+#    packet_transport (UART 115200 baud)
+#         ↓
+#    ESP32-S3 hub_main.yaml (receives and publishes to HA)
+# ============================================================
+
+# ── SUBSTITUTIONS ───────────────────────────────────────────
+# Substitutions are variables: ${device_name} is replaced with
+# the value defined here throughout the file.
+# Useful to avoid repeating the same value in multiple places.
+# I used hub-thread-taverna because I have more than one of these hubs, in different rooms, but you can choose any name you like.
+substitutions:
+  device_name: hub-thread-taverna
+  friendly_name: "Hub - Thread Taverna"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  framework:
+    type: esp-idf
+    # esp-idf is required for ESP32-C6; the Arduino framework
+    # does not support this chip in ESPHome.
+
+# baud_rate: 0 disables the serial logger output so that GPIO16/17
+# are not polluted by log messages — those pins are used for UART
+# communication with the S3 and any stray output would corrupt
+# the packet_transport framing.
+logger:
+  level: INFO
+  baud_rate: 0
+
+# ── UART → ESP32-S3 ──────────────────────────────────────────
+# CROSSED wiring (TX of one side connects to RX of the other):
+#   C6 TX GPIO16 → S3 RX GPIO16
+#   C6 RX GPIO17 → S3 TX GPIO17
+#   GND → GND common (mandatory — shared reference voltage)
+#
+# Both sides must use the same baud_rate (115200).
+# The matching uart block on the S3 side is in hub_main.yaml.
+uart:
+  id: uart_to_s3
+  tx_pin: GPIO16
+  rx_pin: GPIO17
+  baud_rate: 115200
+
+# packet_transport serialises ESPHome sensor/binary_sensor state
+# changes into a compact binary protocol and sends them over UART.
+# The S3 side declares the same sensor IDs as "remote" sources and
+# re-publishes them to Home Assistant as local entities.
+# Only state *changes* are transmitted; there is no polling overhead.
+packet_transport:
+  - platform: uart
+    id: pt_to_s3
+    uart_id: uart_to_s3
+    sensors:
+      - c6_temp_sensor
+      - c6_hum_sensor
+    binary_sensors:
+      - c6_test_button
+
+# ── I2C bus ──────────────────────────────────────────────────
+# scan: true logs all detected addresses at boot — useful for
+# verifying the sensor is wired correctly (SHT31 default: 0x44,
+# alt: 0x45 with ADDR pin high; BME280: 0x76 or 0x77).
+i2c:
+  sda: GPIO2
+  scl: GPIO3
+  scan: true
+
+sensor:
+  # SHT31 is a high-accuracy temp/humidity sensor (±0.2 °C, ±2 %RH).
+  # Replace platform with bme280_i2c and address: 0x76 if using a BME280.
+  - platform: sht3xd
+    address: 0x44
+    update_interval: 30s
+    temperature:
+      id: c6_temp_sensor        # referenced by packet_transport above
+      name: "Temperatura ${device_name}"
+      filters:
+        # Self-heating correction: the ESP32-C6 die raises the ambient
+        # temperature by ~1 °C when the sensor sits close to the PCB.
+        # Adjust this offset after calibrating against a reference probe.
+        - offset: -1.0
+    humidity:
+      id: c6_hum_sensor         # referenced by packet_transport above
+      name: "Umidità ${device_name}"
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO9
+      mode: INPUT_PULLUP   # internal pull-up; button shorts pin to GND
+      inverted: true       # pin LOW (button pressed) → sensor state ON
+    id: c6_test_button     # referenced by packet_transport above
+    name: "Pulsante ${device_name}"
+    filters:
+      # Hardware debounce: ignore transitions shorter than 20 ms to
+      # prevent contact bounce from generating spurious ON events.
+      - delayed_on: 20ms
+
+# ── Status LED ───────────────────────────────────────────────
+# Single WS2812B LED for local visual feedback.
+# Not published to Home Assistant (no api: block on this device).
+# Can be driven manually from automations or lambdas on this node.
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led_c6
+    pin: GPIO6
+    num_leds: 1
+    rgb_order: GRB       # WS2812B uses GRB byte order, not RGB
+    chipset: WS2812
+    name: "Status LED ${device_name}"
+    restore_mode: ALWAYS_OFF   # stays off after a reboot by default
+    effects:
+      - pulse:
+          name: "Pulse lento"
+          transition_length: 1s
+          update_interval: 2s
