@@ -6,3 +6,11 @@
 #include "esp_heap_caps.h"   // heap_caps_get_total_size/free_size, MALLOC_CAP_*
 #include "esp_wifi.h"        // wifi_ap_record_t, esp_wifi_sta_get_ap_info, WIFI_IF_STA
 #include "esp_netif.h"       // esp_netif_t, esp_netif_get_default_netif, esp_netif_ip_info_t
+#include <string>
+#include <vector>
+
+// 20261103 ++ RG #ble_state_over_255
+struct BleDevice {
+  uint64_t mac;
+  std::string label;
+};

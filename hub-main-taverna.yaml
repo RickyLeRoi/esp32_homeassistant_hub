@@ -268,11 +268,11 @@ bluetooth_proxy:
   active: true
 
 # esp32_ble_tracker runs a continuous BLE scan (radio always listening).
-# The device list is cleared every 15s by the interval block, giving
-# a fresh snapshot of visible devices at that moment.
+# Every 30s the interval block publishes the devices seen in the
+# window (count + truncated list) and then clears them.
 # MAC deduplication: each device appears only once per cycle.
 # on_ble_advertise: adds the device only if its MAC is not already
-#   in the list (avoids duplicates within the 15s window).
+#   in the list (avoids duplicates within the 30s window).
 esp32_ble_tracker:
   scan_parameters:
     # interval: time between the start of two consecutive scan windows.
@@ -286,16 +286,18 @@ esp32_ble_tracker:
     active: true           # active scan: required for Bot/Plug/Curtain
   on_ble_advertise:
     - then:
+        # 20261103 ** RG #ble_state_over_255
         - lambda: |-
-            // Add device only if its MAC is not already in the list
-            if (id(ble_scan_results).find(x.address_str()) == std::string::npos
-                && id(ble_scan_results).length() < 900) {
-              char buf[80];
-              const char* nm = x.get_name().empty() ? "Unknown" : x.get_name().c_str();
-              snprintf(buf, sizeof(buf), "%s (%s) %ddBm\n",
-                       nm, x.address_str().c_str(), x.get_rssi());
-              id(ble_scan_results) += std::string(buf);
-            }
+            auto &devices = id(ble_seen_devices);
+            uint64_t mac = x.address_uint64();
+            if (devices.size() >= 128) return;
+            for (const auto &d : devices)
+              if (d.mac == mac) return;
+            char buf[80];
+            const char* nm = x.get_name().empty() ? "Unknown" : x.get_name().c_str();
+            snprintf(buf, sizeof(buf), "%s (%s) %ddBm",
+                     nm, x.address_str().c_str(), x.get_rssi());
+            devices.push_back({mac, std::string(buf)});
 
 # ── I2C BUS ──────────────────────────────────────────────────
 # BME280, BH1750 and SSD1306 share the same I2C bus.
@@ -452,13 +454,13 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
-  # List of BLE devices found during the last scan.
-  # Populated by esp32_ble_tracker.on_ble_advertise, cleared
-  # every 15s by the interval block (or by the "BLE: Scan now" button).
-  - id: ble_scan_results
-    type: std::string
+  # BLE devices seen in the current 30s window (max 128, by MAC).
+  # Populated by esp32_ble_tracker.on_ble_advertise, published and
+  # cleared by the interval block (or cleared by "BLE: Scansiona ora").
+  # 20261103 ** RG #ble_state_over_255
+  - id: ble_seen_devices
+    type: std::vector<BleDevice>
     restore_value: no
-    initial_value: '""'
   # Current volume level (0.0–1.0), mirrored from vol_level.
   # restore_value: yes → remembered across reboots via flash NVS.
   - id: vol_value
@@ -684,28 +686,60 @@ sensor:
     name: "Hub WiFi RSSI"
     update_interval: 15s
 
-# ── TEXT SENSOR: BLE scan results ────────────────────────────
-# The text_sensor exposes the BLE list in the web server (Entities tab).
-# Updated every 3s during scanning and shows all devices found
-# in the format: DeviceName | MAC | dBm
-# The value is reset before each new scan cycle (every 15s).
-text_sensor:
+  # Number of distinct BLE devices seen in the last 30s window.
+  # Published by the interval block below (update_interval: never).
+  # 20261103 ++ RG #ble_state_over_255
   - platform: template
-    id: ble_devices_sensor
+    id: ble_device_count
     name: "BLE: Dispositivi Scoperti"
     icon: "mdi:bluetooth-search"
-    lambda: return id(ble_scan_results);
-    update_interval: 30s
+    unit_of_measurement: "dispositivi"
+    accuracy_decimals: 0
+    state_class: measurement
+    update_interval: never
+
+# ── TEXT SENSOR: BLE scan results ────────────────────────────
+# Human-readable list of the last 30s window, in the format
+# "Name (MAC) -86dBm, ...". Home Assistant drops states longer
+# than 255 characters, so the list is cut at ~230 characters and
+# ends with " +N" for the devices left out. The full count is
+# in "BLE: Dispositivi Scoperti".
+text_sensor:
+  # 20261103 ** RG #ble_state_over_255
+  - platform: template
+    id: ble_devices_list
+    name: "BLE: Elenco Dispositivi"
+    icon: "mdi:bluetooth-search"
+    entity_category: diagnostic
+    update_interval: never
 
 # ── PERIODIC BLE SCAN ───────────────────────────────────────
-# Every 30s: clears the BLE list (new observation window).
+# Every 30s: publishes the window (count + list), then clears it.
+# Publishing and clearing in the same lambda avoids sending an
+# empty list right after a clear.
 # The deduplication in on_ble_advertise restarts from scratch.
-# The "BLE: Scan now" button clears immediately without waiting.
+# The "BLE: Scansiona ora" button clears immediately without waiting.
 interval:
   - interval: 30s
     then:
-      - lambda: id(ble_scan_results) = "";
-      - logger.log: "BLE: list cleared, new scan window"
+      # 20261103 ** RG #ble_state_over_255
+      - lambda: |-
+          auto &devices = id(ble_seen_devices);
+          id(ble_device_count).publish_state(devices.size());
+          std::string list;
+          size_t shown = 0;
+          for (const auto &d : devices) {
+            size_t sep = list.empty() ? 0 : 2;
+            if (list.size() + sep + d.label.size() > 230) break;
+            if (sep) list += ", ";
+            list += d.label;
+            shown++;
+          }
+          if (shown < devices.size())
+            list += " +" + std::to_string(devices.size() - shown);
+          id(ble_devices_list).publish_state(list);
+          devices.clear();
+      - logger.log: "BLE: window published, list cleared"
 
   # ── SENSOR LOG ─────────────────────────────────────────────
   # Every 5s: prints current sensor readings to the log and
@@ -768,7 +802,8 @@ button:
     name: "BLE: Scansiona ora"
     icon: "mdi:bluetooth-search"
     on_press:
-      - lambda: id(ble_scan_results) = "";
+      # 20261103 ** RG #ble_state_over_255
+      - lambda: id(ble_seen_devices).clear();
       - logger.log: "BLE: manual scan started"
 
 # ── DND SWITCH ───────────────────────────────────────────────

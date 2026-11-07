@@ -100,6 +100,29 @@ A fully local smart home hub built on **ESPHome** that integrates voice control,
 
 ---
 
+## BLE scan entities
+
+The main hubs (`hub-main-terra.yaml`, `hub-main-taverna.yaml`) collect the BLE devices seen in a 30 s window, deduplicated by MAC (max 128 per window). At the end of each window they publish two entities and start a new window:
+
+| Entity | Type | State |
+|---|---|---|
+| `BLE: Dispositivi Scoperti` | `sensor` | number of distinct devices seen in the window |
+| `BLE: Elenco Dispositivi` | `text_sensor` (diagnostic) | `Name (MAC) -86dBm, ...`, cut at about 230 characters, then ` +N` for the devices left out |
+
+Home Assistant rejects states longer than 255 characters (`is longer than 255, falling back to unknown`), so the full list is never sent as a single state. The ESPHome native API has no custom attributes, so a full list as an attribute would need a Home Assistant template sensor fed by an event from the hub.
+
+The `BLE: Scansiona ora` button clears the current window. Scanning is paused during voice sessions, so the count can drop to 0 then.
+
+### Migrating from the old text sensor
+
+Up to November 2026 `BLE: Dispositivi Scoperti` was a `text_sensor` holding the whole list. The new numeric sensor has a different `unique_id`, so after the OTA update Home Assistant gives it `sensor.hub_main_<room>_ble_dispositivi_scoperti_2`. To keep the old entity id:
+
+1. In Home Assistant, *Settings -> Devices & services -> Entities*, delete the old entity `sensor.hub_main_<room>_ble_dispositivi_scoperti` (shown as no longer provided).
+2. Rename `..._ble_dispositivi_scoperti_2` to `..._ble_dispositivi_scoperti`.
+3. Update the dashboards, templates and automations that read the old state as text: the state is now a number, and the list is in `sensor.hub_main_<room>_ble_elenco_dispositivi`.
+
+---
+
 ## Bill of Materials
 
 ### ESP32-S3 (Main Hub)
