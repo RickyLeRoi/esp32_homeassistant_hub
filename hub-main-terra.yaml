@@ -292,7 +292,7 @@ esp32_ble_tracker:
             uint64_t mac = x.address_uint64();
             if (devices.size() >= 128) return;
             for (const auto &d : devices)
-              if (d.mac == mac) return;
+              if (d.first == mac) return;
             char buf[80];
             const char* nm = x.get_name().empty() ? "Unknown" : x.get_name().c_str();
             snprintf(buf, sizeof(buf), "%s (%s) %ddBm",
@@ -459,7 +459,7 @@ globals:
   # cleared by the interval block (or cleared by "BLE: Scansiona ora").
   # 20261103 ** RG #ble_state_over_255
   - id: ble_seen_devices
-    type: std::vector<BleDevice>
+    type: std::vector<std::pair<uint64_t, std::string>>
     restore_value: no
   # Current volume level (0.0–1.0), mirrored from vol_level.
   # restore_value: yes → remembered across reboots via flash NVS.
@@ -730,9 +730,9 @@ interval:
           size_t shown = 0;
           for (const auto &d : devices) {
             size_t sep = list.empty() ? 0 : 2;
-            if (list.size() + sep + d.label.size() > 230) break;
+            if (list.size() + sep + d.second.size() > 230) break;
             if (sep) list += ", ";
-            list += d.label;
+            list += d.second;
             shown++;
           }
           if (shown < devices.size())

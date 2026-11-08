@@ -8,9 +8,3 @@
 #include "esp_netif.h"       // esp_netif_t, esp_netif_get_default_netif, esp_netif_ip_info_t
 #include <string>
 #include <vector>
-
-// 20261103 ++ RG #ble_state_over_255
-struct BleDevice {
-  uint64_t mac;
-  std::string label;
-};
